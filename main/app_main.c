@@ -3,84 +3,91 @@
 #include <stdlib.h>
 
 #include "esp_log.h"
+#include "driver/uart.h"
+#include "driver/gpio.h"
 
-#include "storage.c"
-#include "button.c"
-#include "router.c"
-// #include "rtc.c"
-#include "webserver.c"
-#include "MDB_core.h"
-#include "USB_com.h"
+static const char *TAG_MAIN = "EASYMEAL";
 
-static const char *TAG_MAIN = "pcbcrew-router-main";
+#define MDB1_TX 16
+#define MDB1_RX 15
+#define MDB2_TX 18
+#define MDB2_RX 17
+#define MDB1_UART UART_NUM_1
+#define MDB2_UART UART_NUM_2
+#define MDB_LOG_TICK 200
 
-#define TXD_PIN (GPIO_NUM_16)
-#define RXD_PIN (GPIO_NUM_15)
-
-#define LED_PIN 9
+uart_parity_t parity_mode = {UART_PARITY_EVEN};
 
 
-void led_blink(void *pvParams) {
-    gpio_pad_select_gpio(LED_PIN);
-    gpio_set_direction (LED_PIN,GPIO_MODE_OUTPUT);
-    while (1) {
-        gpio_set_level(LED_PIN,0);
-        vTaskDelay(500/portTICK_RATE_MS);
-        gpio_set_level(LED_PIN,1);
-        vTaskDelay(500/portTICK_RATE_MS);
+void init_mdb_uart(int uart_num, int tx_pin, int rx_pin) {
+    uart_config_t uart_config = {
+        .baud_rate = 9600,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_ODD,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_APB,
+    };
+    uart_set_parity(uart_num, parity_mode);
+    uart_driver_install(uart_num, 1024, 0, 0, NULL, 0);
+    uart_param_config(uart_num, &uart_config);
+    uart_set_pin(uart_num, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_set_line_inverse(uart_num, UART_SIGNAL_TXD_INV); //invert TX signal 
+    uart_set_tx_idle_num(uart_num, 1);
+    uart_set_rx_full_threshold(uart_num, 1);
+}
+
+int get_buffered_data_len(int mdb_uart){
+    int length = 0;
+    uart_get_buffered_data_len(mdb_uart, (size_t*)&length);
+    return length;
+}
+
+void get_mdb_data(int mdb_uart, uint8_t *buffer, int len){
+    int length = 0;
+    length = uart_read_bytes(mdb_uart, buffer, len, 1 / portTICK_PERIOD_MS);
+}
+
+void log_mdb_data(int mdb_uart) {
+    int buffered_data_len = 0;
+    uint8_t mdb_data[64];
+
+    buffered_data_len = get_buffered_data_len(mdb_uart);
+    if (buffered_data_len > 0) {
+        get_mdb_data(mdb_uart, mdb_data, buffered_data_len);
+        for (int i = 0; i < buffered_data_len; i++) {
+            printf("%02x ", mdb_data[i]);
+            // Do something with data[i]
+        }
+        printf("\n");
+    } else {
+        printf("none\n");
     }
 }
 
-// void rx_task(void *arg)
-// {
-//     static const char *RX_TASK_TAG = "RX_TASK";
-//     esp_log_level_set(RX_TASK_TAG, ESP_LOG_INFO);
-//     char data[64];
+void mdb1_log_task(void *arg) {
+    init_mdb_uart(MDB1_UART, MDB1_TX, MDB1_RX);
+    while (1) {
+        printf("(MDB1 RX) [VM] ---tx--> [CC]  :  ");
+        log_mdb_data(MDB1_UART);
+        vTaskDelay(pdMS_TO_TICKS(MDB_LOG_TICK));
+    }
+    vTaskDelete(NULL);
+}
 
-//     int length = 0;
+void mdb2_log_task(void *arg) {
+    init_mdb_uart(MDB2_UART, MDB2_TX, MDB2_RX);
+    while (1) {
+        printf("(MDB2 RX) [VM] <--rx--- [CC]  :  ");
+        log_mdb_data(MDB2_UART);
 
-//     while (1) {
-//         uart_get_buffered_data_len(UART_NUM_0, (size_t*)&length);
-
-//         //ESP_LOGI(RX_TASK_TAG, "Cached bytes: %d", length);
-//         if(length>1){
-
-//             length = uart_read_bytes(UART_NUM_0, data, length, 10 / portTICK_PERIOD_MS);
-//             data[length] = '\0'; //null terminate
-//             if( memcmp(data, MDB_USB_BEGIN_SESSION_HEADER, strlen(MDB_USB_BEGIN_SESSION_HEADER))  == 0)
-//             {
-//                 //data+strlen(MDB_USB_BEGIN_SESSION_HEADER);
-//                 //ESP_LOGI(RX_TASK_TAG, "Num bytes: %d", length);
-//                 uint16_t fund;
-//                 fund = atoi(data+strlen(MDB_USB_BEGIN_SESSION_HEADER));
-//                 if(fund>0)
-//                     MDB_send_fund(fund);
-//                 //ESP_LOGI(RX_TASK_TAG, "%d", ( atoi(data+strlen(MDB_USB_BEGIN_SESSION_HEADER)) ) );
-//             }
-
-
-
-//             ESP_LOGI(RX_TASK_TAG, "%s", data);
-//             length = 0;
-//         }
-
-//         vTaskDelay(100 / portTICK_PERIOD_MS);
-
-//     }
-//     free(data);
-// }
-
-
-void app_main(void)
-{
-    esp_log_level_set("*", ESP_LOG_INFO);
-
-    setup_storage();
-    // setup_button();
-    // setup_router();
-    // setup_webserver();
-
-    // xTaskCreate(&rx_task, "uart_rx_task", 4096, NULL, 5, NULL);
-    xTaskCreate(&MDB_core_task, "MDB_task", 4*1024,NULL, configMAX_PRIORITIES-1, NULL);
-    xTaskCreate(&led_blink,"LED_BLINK",4*1024,NULL,4,NULL);
+        printf("\n");
+        vTaskDelay(pdMS_TO_TICKS(MDB_LOG_TICK));
+    }
+    vTaskDelete(NULL);
+}
+    
+void app_main(void) {
+    xTaskCreate(mdb1_log_task, "mdb1_log_task", 2048, NULL, 12, NULL);
+    xTaskCreate(mdb2_log_task, "mdb2_log_task", 2048, NULL, 12, NULL);
 }
